@@ -1,160 +1,206 @@
 import streamlit as st
+from ultralytics import YOLO
 from PIL import Image
-import tensorflow as tf
 import numpy as np
+import os
 
-# ---------------------------
-# CONFIG
-# ---------------------------
+# ----------------------------
+# Load Gemini (Google) AI
+# ----------------------------
+from google import genai
 
-st.set_page_config(page_title="AI Calorie Tracker", layout="centered")
+# Initialize Gemini client using streamlit secrets
+gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+# ----------------------------
+# Load YOLO model (cached)
+# ----------------------------
+@st.cache_resource
+def load_model():
+    return YOLO("yolov8n.pt")
 
-st.title("Smart AI Calorie Tracker")
+model = load_model()
 
-# ---------------------------
-# CALORIE DATABASE
-# ---------------------------
-
+# ----------------------------
+# Simple Calorie Database (expandable)
+# ----------------------------
 calorie_db = {
-    "banana": {"small": 80, "medium": 105, "large": 130},
-    "apple": {"small": 70, "medium": 95, "large": 120},
-    "pizza": {"small": 200, "medium": 285, "large": 400},
-    "cheeseburger": {"small": 250, "medium": 300, "large": 450},
-    "hotdog": {"small": 150, "medium": 250, "large": 350},
-    "ice_cream": {"small": 130, "medium": 210, "large": 300},
+    "banana": 89,
+    "apple": 52,
+    "pizza": 266,
+    "sandwich": 250,
+    "cake": 350,
+    "broccoli": 34,
+    "carrot": 41,
+    "rice": 130,
+    "fried rice": 250,
+    "noodles": 220,
+    "egg": 155,
+    "chicken": 239,
+    "fish": 206,
+    "beef": 250
 }
 
-# ---------------------------
-# STEP 1: BODY INFORMATION
-# ---------------------------
+# ----------------------------
+# Detect food function
+# ----------------------------
+def detect_food(image):
+    results = model(image)
+    detected_items = []
 
-st.header("Step 1: Body Information")
+    for r in results:
+        boxes = r.boxes
+        for box in boxes:
+            cls_id = int(box.cls[0])
+            label = model.names[cls_id]
+            detected_items.append(label)
+
+    return list(set(detected_items))
+
+# ----------------------------
+# Initialize Session State
+# ----------------------------
+if "daily_calories" not in st.session_state:
+    st.session_state.daily_calories = 0
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# ----------------------------
+# APP UI
+# ----------------------------
+st.title("🥗 AI Nutrition Assistant with Gemini")
+
+# ============================
+# STEP 1 — Body Info
+# ============================
+st.header("Step 1: Enter Your Body Info")
 
 gender = st.selectbox("Gender", ["Male", "Female"])
-age = st.number_input("Age", min_value=10, max_value=100, value=20)
-height = st.number_input("Height (cm)", min_value=100, max_value=220, value=160)
-weight = st.number_input("Weight (kg)", min_value=30, max_value=200, value=55)
+age = st.number_input("Age", 10, 100, 25)
+weight = st.number_input("Weight (kg)", 30.0, 200.0, 60.0)
+height = st.number_input("Height (cm)", 100.0, 250.0, 165.0)
+goal = st.selectbox("Goal", ["Maintain", "Lose Weight", "Gain Weight"])
 
-activity_level = st.selectbox(
-    "Activity Level",
-    ["Sedentary", "Lightly Active", "Moderately Active", "Very Active"]
-)
-
-goal = st.selectbox(
-    "Your Goal",
-    ["Lose Weight", "Maintain Weight", "Gain Weight"]
-)
-
-if st.button("Calculate Results"):
-
-    # BMI
+if st.button("Calculate Daily Target"):
     height_m = height / 100
     bmi = weight / (height_m ** 2)
 
-    st.subheader(f"Your BMI: {bmi:.2f}")
-
-    if bmi < 18.5:
-        category = "Underweight"
-    elif bmi < 25:
-        category = "Normal weight"
-    elif bmi < 30:
-        category = "Overweight"
-    else:
-        category = "Obese"
-
-    st.write(f"Category: {category}")
-
-    # BMR (Mifflin-St Jeor)
     if gender == "Male":
         bmr = 10 * weight + 6.25 * height - 5 * age + 5
     else:
         bmr = 10 * weight + 6.25 * height - 5 * age - 161
 
-    # Activity multiplier
-    activity_multipliers = {
-        "Sedentary": 1.2,
-        "Lightly Active": 1.375,
-        "Moderately Active": 1.55,
-        "Very Active": 1.725
-    }
-
-    daily_calories = bmr * activity_multipliers[activity_level]
-
-    # Goal adjustment
     if goal == "Lose Weight":
-        daily_calories -= 500
+        daily_target = bmr - 500
     elif goal == "Gain Weight":
-        daily_calories += 500
+        daily_target = bmr + 500
+    else:
+        daily_target = bmr
 
-    st.session_state["daily_calories"] = int(daily_calories)
+    st.session_state.daily_target = int(daily_target)
+    st.session_state.bmi = round(bmi, 2)
 
-    st.subheader(f"Recommended Daily Calories: {int(daily_calories)} kcal")
+    st.success(f"BMI: {st.session_state.bmi}")
+    st.success(f"Daily Calorie Target: {st.session_state.daily_target} kcal")
 
-# ---------------------------
-# STEP 2: FOOD IMAGE DETECTION
-# ---------------------------
-
+# ============================
+# STEP 2 — Upload Food
+# ============================
 st.header("Step 2: Upload Food Image")
 
-uploaded_file = st.file_uploader("Upload a food photo", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Upload meal image", type=["jpg", "png", "jpeg"])
 
 if uploaded_file:
-
     image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", width="stretch")
+    st.image(image, width=400)
 
-    # Load pretrained model
-    model = tf.keras.applications.MobileNetV2(weights="imagenet")
+    with st.spinner("Detecting food..."):
+        detected_foods = detect_food(image)
 
-    # Preprocess image
-    img = image.resize((224, 224))
-    img_array = tf.keras.preprocessing.image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
-    img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
+    if detected_foods:
+        st.success(f"Detected: {', '.join(detected_foods)}")
 
-    # Predict
-    preds = model.predict(img_array)
-    decoded = tf.keras.applications.mobilenet_v2.decode_predictions(preds, top=1)
+        meal_calories = 0
+        for food in detected_foods:
+            if food in calorie_db:
+                meal_calories += calorie_db[food]
 
-    label = decoded[0][0][1].lower().replace(" ", "_")
-    confidence = decoded[0][0][2]
+        st.write(f"Estimated Meal Calories: {meal_calories} kcal")
 
-    st.subheader("Detected Food:")
-    st.write(f"{label} ({confidence*100:.2f}% confidence)")
-
-    # Calorie calculation
-    if label in calorie_db:
-        portion = st.selectbox("Select Portion Size", ["small", "medium", "large"])
-        calories = calorie_db[label][portion]
-
-        st.session_state["eaten_calories"] = calories
-
-        st.success(f"Estimated Calories: {calories} kcal")
+        if st.button("Add to Daily Intake"):
+            st.session_state.daily_calories += meal_calories
+            st.success("Added to daily intake!")
     else:
-        st.warning("Food detected but not in calorie database.")
+        st.warning("No recognizable food detected.")
 
-# ---------------------------
-# STEP 3: DAILY SUMMARY
-# ---------------------------
+# ============================
+# STEP 3 — Daily Summary
+# ============================
+st.header("Step 3: Daily Summary")
 
-st.header("Step 3: Daily Calorie Summary")
+if "daily_target" in st.session_state:
+    st.write(f"Daily Target: {st.session_state.daily_target} kcal")
+    st.write(f"Calories Consumed: {st.session_state.daily_calories} kcal")
 
-if "daily_calories" in st.session_state and "eaten_calories" in st.session_state:
-
-    daily = st.session_state["daily_calories"]
-    eaten = st.session_state["eaten_calories"]
-    remaining = daily - eaten
-
-    st.write(f"Daily Target: {daily} kcal")
-    st.write(f"Calories Eaten: {eaten} kcal")
-
-    progress = eaten / daily
-    st.progress(min(progress, 1.0))
-
-    if remaining > 0:
-        st.success(f"You can still eat {remaining} kcal today.")
-    else:
-        st.error(f"You exceeded your limit by {abs(remaining)} kcal.")
-
+    remaining = st.session_state.daily_target - st.session_state.daily_calories
+    st.write(f"Remaining Calories: {remaining} kcal")
 else:
-    st.info("Calculate your body info and upload food to see summary.")
+    st.info("Please calculate your daily target first.")
+
+# ============================
+# STEP 4 — AI Meal Recommendation
+# ============================
+st.header("Step 4: AI Meal Suggestion")
+
+if st.button("Get Meal Suggestion"):
+    if "daily_target" not in st.session_state:
+        st.warning("Please calculate body info first.")
+    else:
+        prompt = f"""
+        You are a certified nutritionist.
+        User profile:
+        - Gender: {gender}
+        - Age: {age}
+        - BMI: {st.session_state.bmi}
+        - Goal: {goal}
+        - Daily target: {st.session_state.daily_target}
+        - Calories eaten today: {st.session_state.daily_calories}
+        Suggest:
+        1. Next meal recommendation
+        2. Approximate calories
+        3. Macro balance
+        4. Keep suggestions suitable for Asian diet
+        """
+
+        # Create a chat session with a Gemini model (free tier model like flash)
+        chat = gemini_client.chats.create(model="gemini-2.5-flash")
+        gemini_resp = chat.send_message(prompt)
+        st.write(gemini_resp.text)
+
+# ============================
+# STEP 5 — AI Chat Assistant
+# ============================
+st.header("💬 Nutrition Chat Assistant")
+
+user_input = st.chat_input("Ask about your diet...")
+
+if user_input:
+    # Append new user query into history
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+
+    # Build conversation text for Gemini
+    chat_text = ""
+    for msg in st.session_state.chat_history:
+        chat_text += f"{msg['role']}: {msg['content']}\n"
+
+    # Use Gemini chat session
+    chat = gemini_client.chats.create(model="gemini-2.5-flash")
+    gemini_resp = chat.send_message(chat_text)
+    reply = gemini_resp.text
+
+    st.session_state.chat_history.append({"role": "assistant", "content": reply})
+
+# Display chat messages
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
